@@ -3,6 +3,7 @@ import rospy
 import math
 import numpy as np
 import tf
+import operator
 from geometry_msgs.msg import Twist
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry
@@ -25,10 +26,75 @@ class state_vector:
     def show(self):
         return ((self.x, self.y, self.theta))
 
+class update_feature:
+    def __init__(self, j, H, S, z, z_hat, j_threshold):
+        self.j = j
+        self.H = H
+        self.H_t = np.transpose(H)
+        self.S = S
+        self.S_inv = np.linalg.inv(S)
+        self.z = z
+        self.z_hat = z_hat
+        self.j_threshold = j_threshold
+    
+    def update(self, state_pre, cov_pre):
+        updated = 0
+        print("j = ", self.j)
+        print("j_thres", self.j_threshold)
+        if self.j > self.j_threshold:
+            K = cov_pre * self.H_t * self.S_inv
+            delta_z = self.z - self.z_hat
+            # ensure delta_z phi in the domain of [-pi, pi]
+            delta_phi = self.theta_convert(delta_z[1,0])
+            delta_r = delta_z[0,0]
+            delta_z = np.mat([[delta_r],
+                            [delta_phi], 
+                            [0]])
+            mean_est_matrix = state_pre.matrix() + K * delta_z
+            mean_est_theta = self.theta_convert(mean_est_matrix[2,0])
+            mean_est = state_vector(mean_est_matrix[0,0], 
+                                    mean_est_matrix[1,0],
+                                    mean_est_theta)
+            I = (3,3)
+            I = np.ones(I)
+            cov_est = (I - K * self.H) * cov_pre
+            print("MEASUREMENT UPDATE AVAILABLE !!!")
+            print("j = ", self.j)
+            print("mean estimated = ", (mean_est.x, mean_est.y, mean_est.theta))
+            updated = 1
+        else:
+            # print("MEASUREMENT UPDATE NOT AVAILABLE !!!")
+            # print((state_pre.x, state_pre.y, state_pre.theta))
+            mean_est = state_pre
+            cov_est = cov_pre
+        
+        return (mean_est, cov_est, updated)
+
+    def theta_convert(self, input):
+        # convert rad domain to [-pi, pi]
+        pi = math.pi
+        if input >=0:
+            input = math.fmod(input, 2*pi)
+            if input > pi:
+                input -= 2*pi
+                output = input
+            else:
+                output = input
+        else:
+            input *= -1
+            input = math.fmod(input, 2*pi)
+            if input > pi:
+                input -= 2*pi
+                output = input*-1
+            else:
+                output = input*-1
+        return output
+
 class localization:
     def __init__(self) -> None:
         # self.motion_sub = rospy.Subscriber("cmd_vel", Twist, self.motionCallback)
         self.odom_sub = rospy.Subscriber("odom", Odometry, self.odomCallback)
+        self.tf_broadcaster = tf.TransformBroadcaster()
         self.measurement_sub = rospy.Subscriber("raw_obstacles", Obstacles, self.measurementCallback)
         self.prediction_pub = rospy.Publisher("ekf_prediction", PoseWithCovarianceStamped, queue_size=10)
         self.estimation_pub = rospy.Publisher("ekf_estimation", PoseWithCovarianceStamped, queue_size=10)
@@ -45,21 +111,24 @@ class localization:
                                 [0, 0.1, 0],
                                 [0, 0, 0.1]])
 
-        self.Model_const = np.mat([[0.2, 0, 0],
-                                   [0, 0.2, 0],
-                                   [0, 0, 0.2]])
+        self.Model_const = np.mat([[0.4, 0, 0],
+                                   [0, 0.4, 0],
+                                   [0, 0, 0.4]])
 
         # sensing uncertainty
         self.Q = ([[0.05, 0, 0],
                    [0, 0.05, 0],
-                   [0, 0, 0.1]])
+                   [0, 0, 0.05]])
 
-        self.measurement_update_threshold = 0.8
+        self.measurement_update_threshold = 0.85
         self.observed_features = []
         self.landmark1 = state_vector(1, -0.092, 0)
         self.landmark2 = state_vector(0.055, 3.1, 0)
         self.landmark3 = state_vector(1.953, 3.1, 0)
         self.landmark_list = [self.landmark1, self.landmark2, self.landmark3]
+
+        self.odom_bf = state_vector(0,0,0)
+        self.map_odom = state_vector(0,0,0)
 
     def odomCallback(self, data):
         rate = rospy.Rate(self.frequency)
@@ -69,6 +138,7 @@ class localization:
             cur_y = bf_odom[0][1]
             (roll, pitch, yaw) = euler_from_quaternion(bf_odom[1])
             cur_theta = yaw
+            self.odom_bf = state_vector(cur_x, cur_y, cur_theta)
 
             if self.odom_init:
                 d_x = cur_x - self.odom_past.x
@@ -156,7 +226,7 @@ class localization:
 
     def state_measurement_update(self, state_pre, cov_pre, measurementList):
         # Estimate correspondence and position of robot
-        feature_jmax_list = []
+        feature_list = []
         for obs in self.observed_features:
             z_hat_list = []
             j_list = []
@@ -171,7 +241,7 @@ class localization:
                         [0]])
             print("------------------")
             # print("observed features : ",[r_sense, phi_sense, self.observed_features.index(obs)])
-            print("observed features : ",[obs.x, obs.y])
+            # print("observed features : ",[obs.x, obs.y])
 
             for lm in self.landmark_list:
                 # distance from prediction pose to landmark pose
@@ -196,61 +266,50 @@ class localization:
                 d_z_T = np.transpose(d_z)
                 S_inv = np.linalg.inv(S)
                 det_2piS = np.linalg.det(2 * math.pi * S)
+                print("jjjjjjjjj = ", math.exp(-0.5 * d_z_T * S_inv * d_z))
                 if det_2piS != 0:
                     j =  pow(det_2piS, -0.5) * math.exp(-0.5 * d_z_T * S_inv * d_z)
+                    j = exp(-0.5*transpose(z - z_hat)*inv(S)*(z - z_hat))* (det(2*pi*S))^(-0.5)
                 else:
                     j = 0
                 j_list.append(j)
-                print("landmark", [lm.x, lm.y, lm.theta], "j", j)
+                # print("landmark", [lm.x, lm.y, lm.theta], "j", j)
 
             j_max = max(j_list)
-            print("j_max = ", j_max)
-                
-            if j_max > self.measurement_update_threshold:
-                idx = j_list.index(j_max)
-                H = H_list[idx]
-                H_t = np.transpose(H)
-                S = S_list[idx]
-                z_hat = z_hat_list[idx]
-                S_inv = np.linalg.inv(S)
+            # print("j_max = ", j_max)
+            idx = j_list.index(j_max)
+            H = H_list[idx]
+            S = S_list[idx]
+            z_hat = z_hat_list[idx]
+            Feat = update_feature(j_max, H, S, z, z_hat, self.measurement_update_threshold)
+            feature_list.append(Feat)
 
-                K = cov_pre * H_t * S_inv
-                
-                delta_z = z - z_hat
-                # ensure delta_z phi in the domain of [-pi, pi]
-                delta_phi = self.theta_convert(delta_z[1,0])
-                delta_r = delta_z[0,0]
-                delta_z = np.mat([[delta_r],
-                                    [delta_phi], 
-                                    [0]])
+        feature_list.sort(key=operator.attrgetter('j'), reverse=True)
+        m_iter = state_pre
+        c_iter = cov_pre
+        for idx in range(len(self.landmark_list)):
+            print(idx)
+            # print(feature_list[idx].j)
+            (m_iter, c_iter, updated) = feature_list[idx].update(m_iter, c_iter)
+            rospy.Rate(30).sleep()
+        mean_est = m_iter
+        cov_est = c_iter
+        self.estimation_publish(mean_est, cov_est)
+        self.transform_publish(mean_est, self.odom_bf)
+        self.State_past = mean_est
+        self.Cov_past = cov_est
+        # print("=================")
 
-                mean_est_matrix = state_pre.matrix() + K * delta_z
-                mean_est_theta = self.theta_convert(mean_est_matrix[2,0])
-                mean_est = state_vector(mean_est_matrix[0,0], 
-                                        mean_est_matrix[1,0],
-                                        mean_est_theta)
-
-                I = (3,3)
-                I = np.ones(I)
-                cov_est = (I - K * H) * cov_pre
-
-                print((mean_est.x, mean_est.y, mean_est.theta))
-                print("MEASUREMENT UPDATE AVAILABLE !!!")
-                self.estimation_publish(mean_est, cov_est)
-                self.State_past = mean_est
-                self.Cov_past = cov_est
-
-            else:
-                print("MEASUREMENT UPDATE NOT AVAILABLE !!!")
-                # print((state_pre.x, state_pre.y, state_pre.theta))
-                mean_est = state_pre
-                cov_est = cov_pre
-                self.estimation_publish(mean_est, cov_est)
-                self.State_past = mean_est
-                self.Cov_past = cov_est
-        
-        rospy.Rate(30).sleep()
-        print("=================")
+    def transform_publish(self, map_bf, odom_bf):
+        map_odom = state_vector(0,0,0)
+        map_odom.x = map_bf.x - odom_bf.x
+        map_odom.y = map_bf.y - odom_bf.y
+        map_odom.theta = self.theta_convert(map_bf.theta - odom_bf.theta)
+        rate = rospy.Rate(30)
+        quat = quaternion_from_euler(0,0,map_odom.theta)
+        pose = (map_odom.x, map_odom.y, 0)
+        self.tf_broadcaster.sendTransform(pose, quat, rospy.Time.now(), "odom", "map")
+        rate.sleep()
 
     def prediction_publish(self, state, cov_mat):
         pose_msg = PoseWithCovarianceStamped()

@@ -104,13 +104,13 @@ class localization:
         # self.d_t = 1/self.control_frequency
         
         self.odom_init = 0
-        self.init_pose = state_vector(0,0,0)
+        self.init_pose = state_vector(0.5 ,0.5 ,pi/2)
         self.odom_past = self.init_pose
         self.State_past = self.init_pose
 
-        self.Cov_past = np.mat([[0.01, 0, 0],
-                                [0, 0.01, 0],
-                                [0, 0, 0.01]])
+        self.Cov_past = np.mat([[0, 0, 0],
+                                [0, 0, 0],
+                                [0, 0, 0]])
 
         self.Model_const = np.mat([[0.4, 0, 0],
                                    [0, 0.4, 0],
@@ -120,7 +120,7 @@ class localization:
         self.Q = ([[0.05, 0, 0],
                    [0, 0.05, 0],
                    [0, 0, 0.05]])
-        self.measurement_update_threshold = 1
+        self.measurement_update_threshold = 0.8
         self.observed_features = []
         self.landmark1 = state_vector(1, -0.092, 0)
         self.landmark2 = state_vector(0.055, 3.1, 0)
@@ -130,50 +130,29 @@ class localization:
         self.odom_bf = state_vector(0,0,0)
         self.map_odom = state_vector(0,0,0)
 
-    def odomCallback(self, data):
-        rate = rospy.Rate(self.frequency)
-        if self.tf_listener.canTransform('odom', 'base_footprint', rospy.Time(0)):
-            bf_odom = self.tf_listener.lookupTransform('odom', 'base_footprint', rospy.Time(0))
-            cur_x = bf_odom[0][0]
-            cur_y = bf_odom[0][1]
-            (roll, pitch, yaw) = euler_from_quaternion(bf_odom[1])
-            cur_theta = yaw
-            self.odom_bf = state_vector(cur_x, cur_y, cur_theta)
+        self.stamp_past = rospy.get_time()
+        self.d_t = 0
 
-            if self.odom_init:
-                d_x = cur_x - self.odom_past.x
-                d_y = cur_y - self.odom_past.y
-                d_theta = self.theta_error_signed(self.odom_past.theta, cur_theta)
-                
-
-                tf_angle = self.theta_convert(cur_theta)
-                vec_x = d_x * math.cos(-tf_angle) + d_y * -math.sin(-tf_angle)
-                vec_y = d_x * math.sin(-tf_angle) + d_y * math.cos(-tf_angle)
-                
-                ############################
-                # for stage simulation bug #
-                # vec_y *= -1              #
-                ############################
-                
-                U_t = state_vector(vec_x, vec_y, d_theta)
-                # print("-------------------")
-                # print("d_xytheta = ", (d_x, d_y, d_theta))
-                # print("U_t = ", U_t.show())
-                # print("current theta = ", cur_theta)
-
-                self.state_prediction(self.State_past, self.Cov_past, U_t)
-                self.odom_past.x = cur_x
-                self.odom_past.y = cur_y
-                self.odom_past.theta = cur_theta
-                rate.sleep()
-                
-            else:
-                self.odom_past.x = cur_x
-                self.odom_past.y = cur_y
-                self.odom_past.theta = cur_theta
-                self.State_past = state_vector(cur_x, cur_y, cur_theta)
-                self.odom_init = 1
-                print("Initial pose at ", (cur_x, cur_y, cur_theta))
+    def odomCallback(self, odom):
+        stamp = rospy.get_time()
+        # rospy.loginfo("odom time: %s, now: %s", odom.header.stamp, stamp)
+        v_x = odom.twist.twist.linear.x
+        v_y = odom.twist.twist.linear.y
+        w = odom.twist.twist.angular.z
+        U_t = state_vector(v_x, v_y, w)
+        self.d_t = stamp - self.stamp_past
+        state_pre, cov_pre = self.state_prediction(self.State_past, self.Cov_past, U_t)
+        print("v_x, v_y, w = ", v_x, v_y, w)
+        self.State_past = state_pre
+        self.Cov_past = cov_pre
+        # print("state_pre = \n", state_pre.matrix())
+        # print("cov_pre = \n", cov_pre)
+        # print("------------------------------")
+        # self.ekf_localization(v_x, v_y, w)
+        # self.publish_ekf_pose(stamp + rospy.Duration(0.2))
+        # self.broadcast_ekf_pos_tf(odom)
+        self.stamp_past = stamp
+        rospy.Rate(60).sleep()
 
     def measurementCallback(self, data):
         obstacleList = []
@@ -183,19 +162,23 @@ class localization:
 
     def state_prediction(self, state_past, cov_past, U_t):
         # motion input in robot frame
-        d_x = U_t.x
-        d_y = U_t.y
-        d_theta = U_t.theta
+        d_x = U_t.x * self.d_t
+        d_y = U_t.y * self.d_t
+        d_theta = U_t.theta * self.d_t
         theta = state_past.theta
         theta_ = state_past.theta + d_theta/2
-
+        s_theta = math.sin(theta)
+        c_theta = math.cos(theta)
+        s__theta = math.sin(theta_)
+        c__theta = math.cos(theta_)
+        
         # Jacobian matrix for Ekf linearization
-        Gt = np.mat([[1, 0, -d_x * math.sin(theta) - d_y * math.cos(theta)],
-                     [0, 1, d_x * math.cos(theta) - d_y * math.sin(theta)],
+        Gt = np.mat([[1, 0, -d_x * s_theta - d_y * c_theta],
+                     [0, 1, d_x * c_theta - d_y * s_theta],
                      [0, 0, 1]])
         
-        Wt = np.mat([[math.cos(theta_), -math.sin(theta_), -d_x * math.sin(theta_)/2 - d_y * math.cos(theta_)/2],
-                     [math.sin(theta_), math.cos(theta_), d_x * math.cos(theta_)/2 - d_y * math.sin(theta_)/2],
+        Wt = np.mat([[c__theta, -s__theta, -d_x * s__theta/2 - d_y * c__theta/2],
+                     [s__theta, c__theta, d_x * c__theta/2 - d_y * s__theta/2],
                      [0, 0, 1]])
 
         # Calculate model covariance
@@ -210,8 +193,8 @@ class localization:
                              [0, 0, var_theta]])
         
         # Prediction Mean
-        x_pre = state_past.x + d_x * math.cos(theta_) - d_y * math.sin(theta_)
-        y_pre = state_past.y + d_x * math.sin(theta_) + d_y * math.cos(theta_)
+        x_pre = state_past.x + d_x * c__theta - d_y * s__theta
+        y_pre = state_past.y + d_x * s__theta + d_y * c__theta
         theta_pre = state_past.theta + d_theta
         state_pre = state_vector(x_pre, y_pre, theta_pre)
 
@@ -220,10 +203,10 @@ class localization:
         Wt_T = np.transpose(Wt)
         cov_pre = Gt * cov_past * Gt_T + Wt * cov_motion * Wt_T
         # print(cov_pre)
-        self.state_measurement_update(state_pre, cov_pre, self.observed_features)
-        
+        # self.state_measurement_update(state_pre, cov_pre, self.observed_features)
         # rviz visualization
         self.prediction_publish(state_pre, cov_pre)
+        return [state_pre, cov_pre]
 
     def state_measurement_update(self, state_pre, cov_pre, measurementList):
         # Estimate correspondence and position of robot
@@ -259,10 +242,14 @@ class localization:
                 H = np.mat([[-(lm.x - state_pre.x)/q_sqrt, -(lm.y - state_pre.y)/q_sqrt, 0],
                             [(lm.y - state_pre.y)/q, -(lm.x - state_pre.x)/q, -1],
                             [0, 0, 0]])
+                H = self.matrix_tozero(H)
                 H_list.append(H)
 
                 H_t = np.transpose(H)
+
+                cov_pre = self.matrix_tozero(cov_pre)
                 S = H * cov_pre * H_t + self.Q
+                S = self.matrix_tozero(S)
                 S_list.append(S)
 
                 d_z = z - z_hat
@@ -270,13 +257,7 @@ class localization:
                 d_z_T = np.transpose(d_z)
                 S_inv = np.linalg.inv(S)
                 det_2piS = np.linalg.det(2 * math.pi * S)
-                print("z_hat = \n", z_hat, end="\n\n")
-                print("H = \n", H, end="\n\n")
-                print("Cov_pre = \n", cov_pre, end="\n\n")
-                print("H_t = \n", H_t, end="\n\n")
-                print("S = \n", S, end="\n\n")
-                print("2piS = \n", 2 * math.pi * S, end="\n\n")
-                print("det 2piS = \n", det_2piS, end="\n\n")
+
 
                 if det_2piS != 0:
                     try:
@@ -290,6 +271,14 @@ class localization:
                 else:
                     j = 0
                 j_list.append(j)
+
+                print("z_hat = \n", z_hat, end="\n\n")
+                print("H = \n", H, end="\n\n")
+                print("Cov_pre = \n", cov_pre, end="\n\n")
+                print("H_t = \n", H_t, end="\n\n")
+                print("S = \n", S, end="\n\n")
+                print("2piS = \n", 2 * math.pi * S, end="\n\n")
+                print("det 2piS = \n", det_2piS, end="\n\n")
                 print("landmark", [lm.x, lm.y, lm.theta], ", j = ", j)
 
             j_max = max(j_list)
@@ -318,26 +307,18 @@ class localization:
                 I = (3,3)
                 I = np.ones(I)
                 cov_est = (I - K * H) * cov_pre
+                print("updated")
             else:
                 mean_est = state_pre
                 cov_est = cov_pre
+                print("fuckk")
 
-        # feature_list.sort(key=operator.attrgetter('j'), reverse=True)
-        # m_iter = state_pre
-        # c_iter = cov_pre
-        # for idx in range(len(self.landmark_list)):
-        #     # print(idx)
-        #     # print(feature_list[idx].j)
-        #     (m_iter, c_iter, updated) = feature_list[idx].update(m_iter, c_iter)
-        # (m_iter, c_iter, updated) = feature_list[idx].update(m_iter, c_iter)
-        # mean_est = m_iter
-        # cov_est = c_iter
         self.estimation_publish(mean_est, cov_est)
-        self.transform_publish(mean_est, self.odom_bf)
-        self.State_past = mean_est
-        self.Cov_past = cov_est
-        rospy.Rate(20).sleep()
-        print("=================")
+        # self.transform_publish(mean_est, self.odom_bf)
+        # self.State_past = mean_est
+        # self.Cov_past = cov_est
+        # rospy.Rate(30).sleep()
+        print("============================")
 
     def transform_publish(self, map_bf, odom_bf):
         map_odom = state_vector(0,0,0)
@@ -353,7 +334,7 @@ class localization:
     def prediction_publish(self, state, cov_mat):
         pose_msg = PoseWithCovarianceStamped()
         pose_msg.header.stamp = rospy.get_rostime()
-        pose_msg.header.frame_id = "map"
+        pose_msg.header.frame_id = "odom"
         pose_msg.pose.pose.position.x = state.x
         pose_msg.pose.pose.position.y = state.y
         quaternion = quaternion_from_euler(0, 0, state.theta)
@@ -363,11 +344,11 @@ class localization:
         pose_msg.pose.pose.orientation.w = quaternion[3]
 
         pose_msg.pose.covariance = [cov_mat[0,0], 0, 0, 0, 0, 0,
-                               0, cov_mat[1,1], 0, 0, 0, 0,
-                               0, 0, 0, 0, 0, 0,
-                               0, 0, 0, 0, 0, 0,
-                               0, 0, 0, 0, 0, 0,
-                               0, 0, 0, 0, 0, cov_mat[2,2]]
+                                    0, cov_mat[1,1], 0, 0, 0, 0,
+                                    0, 0, 0, 0, 0, 0,
+                                    0, 0, 0, 0, 0, 0,
+                                    0, 0, 0, 0, 0, 0,
+                                    0, 0, 0, 0, 0, cov_mat[2,2]]
 
         self.prediction_pub.publish(pose_msg)
 
@@ -428,6 +409,15 @@ class localization:
         if abs(self.theta_convert(theta_start + theta_err) - theta_final) > 0.001:
             theta_err *= -1
         return theta_err
+
+    def matrix_tozero(self, matrix):
+        rows = matrix.shape[0]
+        columns = matrix.shape[1]
+        for i in range(rows):
+            for j in range(columns):
+                if abs(matrix[i,j]) < 0.00001:
+                    matrix[i,j] = 0
+        return matrix
 
 if __name__ == '__main__':
     rospy.init_node('ekf_localization', anonymous = True)

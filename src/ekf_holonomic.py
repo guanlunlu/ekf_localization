@@ -8,6 +8,8 @@ from nav_msgs.msg import Odometry
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from tf import TransformBroadcaster
 import tf.transformations as tf_t
+from obstacle_detector.msg import Obstacles
+from obstacle_detector.msg import CircleObstacle
 
 class state_vector:
     def __init__(self, x, y, theta):
@@ -31,9 +33,9 @@ class EKF:
                                          [ 3.1, -0.1,  3.1]])
 
         # for robot initial state (x; y; phi(-pi,pi))
-        self.mu_0 = np.array([[0.5],\
-                              [0.5],\
-                              [0.5*np.pi]])
+        self.mu_0 = np.array([[0.55],\
+                              [2.65],\
+                              [-0.5*np.pi]])
         
         # for robot state
         self.mu_past = self.mu_0.copy()
@@ -41,9 +43,9 @@ class EKF:
                             [0.0],\
                             [0.0]])
 
-        self.Model_const = np.mat([[0.4, 0, 0],
-                                   [0, 0.4, 0],
-                                   [0, 0, 0.4]])
+        self.Model_const = np.mat([[6, 0, 0],
+                                   [0, 6, 0],
+                                   [0, 0, 6]])
 
         self.sigma_past = np.zeros((3,3))
         self.sigma = np.zeros((3,3))
@@ -59,10 +61,13 @@ class EKF:
         self.odom_sub = rospy.Subscriber("odom", Odometry, self.odom_sub_callback)
         self.obstacles_sub = rospy.Subscriber("raw_obstacles", Obstacles, self.obstacles_sub_callback)
         self.ekf_pose_pub = rospy.Publisher("ekf_pose", PoseWithCovarianceStamped, queue_size=10)
+        self.landmark_rviz = rospy.Publisher('landmark_extracted', Obstacles, queue_size=10)
         self.ekf_pose_tfbr = TransformBroadcaster()
         
         self.map_frame_name = "map"
         self.robot_frame_name = "base_footprint"
+        self.updated_landmark_scan = []
+
         
     def ekf_localization(self, v_x, v_y, w):
         # set motion covariance
@@ -71,7 +76,7 @@ class EKF:
         # a3 = 0.5
         # a4 = 0.8
         # # set a minimum likelihood value
-        mini_likelihood = 0.5
+        mini_likelihood = 0.2
         # # for convenience, ex: s_dt = sin(theta+wdt) 
         # theta = self.mu_past[2, 0].copy()
         # s = np.sin(theta)
@@ -125,8 +130,9 @@ class EKF:
                           [mu_bar.theta]])
 
         # ekf update step:
-        Q = np.diag((0.001, 0.2, 0.02))
+        Q = np.diag((0.01, 0.01, 0.1))
         if self.if_new_obstacles is True:
+            self.updated_landmark_scan = []
             # for every obstacle (or beacon pillar), check the distance between real beacon position and itself.
             for landmark_scan in np.nditer(self.beacon_scan, flags=['external_loop'], order='F'):
                 landmark_scan = np.reshape(landmark_scan, (2,1))
@@ -157,26 +163,34 @@ class EKF:
                         # continue
                     # rospy.loginfo("H_k=%s, sigma_bar=%s, S_k=%s", H_k, sigma_bar, S_k)
                     # print("S_k-Q = ", H_k@sigma_bar@H_k.T, "H_k = ", H_k, "sigma_bar = ", sigma_bar)
+                # rospy.loginfo("j_max = %s", j_max)
                 if j_max > mini_likelihood and j_max != np.nan:
                     K_i = sigma_bar@H_j_max.T@np.linalg.inv(S_j_max)
                     mu_bar = mu_bar + K_i@(z_i-z_j_max)
                     sigma_bar = (np.eye(3) - self._fix_FP_issue(K_i@H_j_max))@sigma_bar
+                    # rviz visualize
+                    lx = landmark_scan[0,0]
+                    ly = landmark_scan[1,0]
+                    self.updated_landmark_scan.append(state_vector(lx, ly, 0))
 
+            # rospy.loginfo("-------------")
+        # print(updated_landmark_scan)
         self.mu = mu_bar.copy()
         self.sigma = self._fix_FP_issue(sigma_bar.copy())
         self.mu_past = self.mu.copy()
         self.sigma_past = self.sigma.copy()
         # finish once ekf, change the flag
         self.if_new_obstacles = False
+        self.show_landmark_extracted(self.updated_landmark_scan)
 
     def state_prediction(self, state_past, cov_past, U_t):
         # motion input in robot frame
         # d_x = U_t.x * self.d_t
         # d_y = U_t.y * self.d_t
         # d_theta = U_t.theta * self.d_t
-        d_x = U_t.x /50
-        d_y = U_t.y /50
-        d_theta = U_t.theta /50
+        d_x = U_t.x /100
+        d_y = U_t.y /100
+        d_theta = U_t.theta /100
         theta = state_past.theta
         theta_ = state_past.theta + d_theta/2
         s_theta = np.sin(theta)
@@ -320,6 +334,22 @@ class EKF:
                                          odom.header.stamp,
                                          odom.header.frame_id,
                                          self.map_frame_name)
+
+    def show_landmark_extracted(self, landmarks):
+        msg = Obstacles()
+        msg.header.stamp = rospy.Time(0)
+        msg.header.frame_id = "base_footprint"
+        circleList = []
+        
+        for i in landmarks:
+            circle = CircleObstacle()
+            circle.center.x = i.x
+            circle.center.y = i.y
+            circle.radius = 0.15
+            circle.true_radius = 0.1
+            circleList.append(circle)
+        msg.circles = circleList
+        self.landmark_rviz.publish(msg)
 
 if __name__ == '__main__':
     rospy.init_node('ekf_localization', anonymous=True)

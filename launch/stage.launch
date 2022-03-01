@@ -22,8 +22,11 @@
     <include file="$(find obstacle_detector)/launch/nodes.launch"/>
 
     <!-- ekf node for holonomic drive -->
-    <!-- <node name="ekf_localization" pkg="ekf_localization" type="EKF_UC.py" output="screen"/> -->
+    <node pkg="tf" type="static_transform_publisher" name="landmark1_broadcaster" args="0.05 3.1 0 0 0 0 map landmark1 100" />
+    <node pkg="tf" type="static_transform_publisher" name="landmark2_broadcaster" args="1.0 -0.05 0 0 0 0 map landmark2 100" />
+    <node pkg="tf" type="static_transform_publisher" name="landmark3_broadcaster" args="1.95 3.1 0 0 0 0 map landmark3 100" />
     <node name="ekf_localization" pkg="ekf_localization" type="ekf_holonomic.py" output="screen"/>
+    <!-- <node name="landmark_extractor" pkg="ekf_localization" type="landmark_extractor.py" /> -->
 
     <!-- teleop keyboard -->
     <!-- <node name="teleop_twist_keyboard" pkg="teleop_twist_keyboard" type="teleop_twist_keyboard.py" output="screen"/> -->

@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 import numpy as np
 import math
+
 # for ros
 import rospy
 import operator
@@ -44,11 +45,42 @@ class update_feature:
         # raw feature scanned by LiDAR (basefootprint origin)([[x],[y]])
         self.landmark_scan = landmark_scan
         self.mini_likelihood = 0.3
+        # feature heuristic function
+        self.score = 0
+        self.likelihood_weight = 1.1
+        self.translation_const= 0.3
+        self.trans_sat = 5
+        self.rotation_const = 0.5
+        self.rot_sat = 5
+        self.score_threshold = 10
     
+    def update_condition(self, vec_err):
+        trans_err = abs(vec_err[0,0])
+        rot_err = abs(self.theta_convert(vec_err[1,0]))
+        # print("err", (trans_err, rot_err))
+        if round(trans_err,10) != 0:
+            trans_score = self.translation_const/trans_err
+        else:
+            trans_score = self.trans_sat
+
+        if round(rot_err, 10) != 0:
+            rot_score = self.rotation_const/rot_err
+        else:
+            rot_score = self.rot_sat
+        self.score = trans_score + rot_score + self.j * self.likelihood_weight
+        # print(self.score)
+        if self.score > self.score_threshold:
+            return 1
+        else:
+            return 0
+
     def update(self, state_pre, cov_pre):
-        if self.j > self.mini_likelihood and self.j != np.nan:
+        # if self.j > self.mini_likelihood and self.j != np.nan:
+        if self.update_condition(self.z-self.z_hat):
             K_i = cov_pre@self.H.T@np.linalg.inv(self.S)
-            mu_bar = state_pre + K_i@(self.z-self.z_hat)
+            d_z = self.z-self.z_hat
+            d_z[1,0] = self.theta_convert(d_z[1,0])
+            mu_bar = state_pre + K_i@(d_z)
             sigma_bar = (np.eye(3) - self._fix_FP_issue(K_i@self.H))@cov_pre
             
             # rviz visualize
@@ -63,6 +95,26 @@ class update_feature:
     def _fix_FP_issue(self, matrix, upper_bound=1e-10):
         matrix[matrix<upper_bound] = 0
         return matrix
+
+    def theta_convert(self, input):
+        # convert rad domain to [-pi, pi]
+        pi = math.pi
+        if input >=0:
+            input = math.fmod(input, 2*pi)
+            if input > pi:
+                input -= 2*pi
+                output = input
+            else:
+                output = input
+        else:
+            input *= -1
+            input = math.fmod(input, 2*pi)
+            if input > pi:
+                input -= 2*pi
+                output = input*-1
+            else:
+                output = input*-1
+        return output
 
 class EKF:
     def __init__(self):
@@ -108,8 +160,8 @@ class EKF:
         self.sss_equiv_threshold = 0.07
         # for ros
         self.odom_sub = rospy.Subscriber("odom", Odometry, self.odom_sub_callback)
-        self.obstacles_sub = rospy.Subscriber("raw_obstacles", Obstacles, self.obstacles_sub_callback)
-        # self.obstacles_sub = rospy.Subscriber("landmark_extracted", Obstacles, self.obstacles_sub_callback)
+        # self.obstacles_sub = rospy.Subscriber("raw_obstacles", Obstacles, self.obstacles_sub_callback)
+        self.obstacles_sub = rospy.Subscriber("landmark_extracted", Obstacles, self.obstacles_sub_callback)
         # self.imu_sub = rospy.Subscriber("imu", Imu, self.imu_sub_callback)
         # self.initialpose_sub = rospy.Subscriber("initialpose", Obstacles, self.initialpose_sub_callback)
         self.ekf_pose_pub = rospy.Publisher("ekf_pose", PoseWithCovarianceStamped, queue_size=10)
@@ -145,28 +197,36 @@ class EKF:
                 # transfer landmark_scan type from (x, y) to (r, phi)
                 landmark_scan = np.reshape(landmark_scan, (2,1))
                 z_i = self._cartesian_to_polar(landmark_scan, np.zeros((3,1)))
-                j_max = -100
+                j_max = -10000000
+                d_min = 100000000
                 H_j_max = 0
                 S_j_max = 0
                 z_j_max = 0
+
                 landmark_kmax_x = -10
                 landmark_kmax_y = -10
                 for k in range(self.beacon_position.shape[1]):
                     landmark_k = np.reshape(self.beacon_position[:,k], (2,1))
-
                     z_k, H_k = self._cartesian_to_polar(landmark_k, mu_bar, cal_H=True)
+                    landmark_k_cart = np.array([[z_k[0,0] * np.cos(z_k[1,0])], [z_k[0,0] * np.sin(z_k[1,0])]])
                     S_k = H_k@sigma_bar@H_k.T + Q
                     S_k = self._fix_FP_issue(S_k)
                     try:
                         # original 
-                        j_k = 1/np.sqrt(np.linalg.det(2*np.pi*S_k)) * np.exp(-0.5*(z_i-z_k).T@np.linalg.inv(S_k)@(z_i-z_k))
+                        # j_k = 1/np.sqrt(np.linalg.det(2*np.pi*S_k)) * np.exp(-0.5*(z_i-z_k).T@np.linalg.inv(S_k)@(z_i-z_k))
+                        d = self._euclidean_distance(landmark_scan, landmark_k_cart)
+                        
                         # ln(j_k()) version
-                        # j_k = -0.5*(z_i-z_k).T@np.linalg.inv(S_k)@(z_i-z_k) - np.log(np.sqrt(np.linalg.det(2*np.pi*S_k)))
-
+                        d_z = z_i-z_k
+                        d_z[1,0] = self.theta_convert(d_z[1,0])
+                        print(d_z)
+                        j_k = -0.5*(d_z).T@np.linalg.inv(S_k)@(d_z) - np.log(np.sqrt(np.linalg.det(2*np.pi*S_k)))
+                        # print(d)
                         if np.around(j_k, 10)[0,0] > np.around(j_max, 10):
+                        # if d < d_min:
+                            d_min = d
                             landmark_kmax_x = landmark_k[0,0]
                             landmark_kmax_y = landmark_k[1,0]
-                            
                             j_max = j_k.copy()
                             H_j_max = H_k.copy()
                             S_j_max = S_k.copy()
@@ -208,6 +268,8 @@ class EKF:
                     ly = L3_feat.landmark_scan[1,0]
                     self.updated_landmark_scan.append(state_vector(lx, ly, 0))
         # rospy.loginfo_throttle(0.5, "------------------")
+        print("----------")
+
 
         self.mu = mu_bar.copy()
         self.sigma = self._fix_FP_issue(sigma_bar.copy())
@@ -412,6 +474,33 @@ class EKF:
     def imu_sub_callback(self, imu):
         self.imu_w = imu.angular_velocity.z
 
+    def theta_convert(self, input):
+        # convert rad domain to [-pi, pi]
+        pi = math.pi
+        if input >=0:
+            input = math.fmod(input, 2*pi)
+            if input > pi:
+                input -= 2*pi
+                output = input
+            else:
+                output = input
+        else:
+            input *= -1
+            input = math.fmod(input, 2*pi)
+            if input > pi:
+                input -= 2*pi
+                output = input*-1
+            else:
+                output = input*-1
+        return output
+
+    def theta_error(self,theta1, theta2):
+        curPos_vx = math.cos(theta1)
+        curPos_vy = math.sin(theta1)
+        goalPos_vx = math.cos(theta2)
+        goalPos_vy = math.sin(theta2)
+        theta_err = math.acos(curPos_vx * goalPos_vx + curPos_vy * goalPos_vy)
+        return theta_err
 
 if __name__ == '__main__':
     rospy.init_node('ekf_localization', anonymous=True)

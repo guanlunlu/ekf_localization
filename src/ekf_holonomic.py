@@ -3,6 +3,7 @@ import numpy as np
 import math
 # for ros
 import rospy
+import operator
 from obstacle_detector.msg import Obstacles
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import PoseWithCovarianceStamped
@@ -29,9 +30,41 @@ class state_vector:
     def distanceto(self, p):
         return math.sqrt(pow(self.x-p.x, 2) + pow(self.y-p.y, 2))
 
+class update_feature:
+    def __init__(self, j, H, S, z, z_hat, landmark):
+        self.j = j
+        self.H = H
+        self.H_t = np.transpose(H)
+        self.S = S
+        self.z = z
+        # feature measument vector
+        self.z_hat = z_hat
+        # the landmark which feature corresponded to ([[x],[y]])
+        self.landmark = landmark
+        self.mini_likelihood = 0.4
+    
+    def update(self, state_pre, cov_pre):
+        if self.j > self.mini_likelihood and self.j != np.nan:
+            K_i = cov_pre@self.H.T@np.linalg.inv(self.S)
+            mu_bar = state_pre + K_i@(self.z-self.z_hat)
+            sigma_bar = (np.eye(3) - self._fix_FP_issue(K_i@self.H))@cov_pre
+            
+            # rviz visualize
+            # lx = landmark_scan[0,0]
+            # ly = landmark_scan[1,0]
+            # self.updated_landmark_scan.append(state_vector(lx, ly, 0))
+            print([mu_bar, sigma_bar])
+            return [mu_bar, sigma_bar]
+        else:
+            return "update error"
+
+    def _fix_FP_issue(self, matrix, upper_bound=1e-10):
+        matrix[matrix<upper_bound] = 0
+        return matrix
+
 class EKF:
     def __init__(self):
-        self.landmark1 = state_vector(1,0, -0.05, 0)
+        self.landmark1 = state_vector(1.0, -0.05, 0)
         self.landmark2 = state_vector(1.95, 3.1, 0)
         self.landmark3 = state_vector(0.05, 3.1, 0)
         # for beacon position ([x], [y])
@@ -40,13 +73,13 @@ class EKF:
 
 
         # for robot initial state (x; y; phi(-pi,pi))
-        # self.mu_0 = np.array([[0.5],\
-        #                       [0.5],\
-        #                       [0.5*np.pi]])
+        self.mu_0 = np.array([[0.5],\
+                              [0.5],\
+                              [0.5*np.pi]])
 
-        self.mu_0 = np.array([[0.55],\
-                              [2.65],\
-                              [-0.5*np.pi]])
+        # self.mu_0 = np.array([[0.55],\
+        #                       [2.65],\
+        #                       [-0.5*np.pi]])
         
         # for robot state
         self.mu_past = self.mu_0.copy()
@@ -73,9 +106,9 @@ class EKF:
         self.sss_equiv_threshold = 0.07
         # for ros
         self.odom_sub = rospy.Subscriber("odom", Odometry, self.odom_sub_callback)
-        # self.obstacles_sub = rospy.Subscriber("raw_obstacles", Obstacles, self.obstacles_sub_callback)
-        self.obstacles_sub = rospy.Subscriber("landmark_extracted", Obstacles, self.obstacles_sub_callback)
-        self.imu_sub = rospy.Subscriber("imu", Imu, self.imu_sub_callback)
+        self.obstacles_sub = rospy.Subscriber("raw_obstacles", Obstacles, self.obstacles_sub_callback)
+        # self.obstacles_sub = rospy.Subscriber("landmark_extracted", Obstacles, self.obstacles_sub_callback)
+        # self.imu_sub = rospy.Subscriber("imu", Imu, self.imu_sub_callback)
         # self.initialpose_sub = rospy.Subscriber("initialpose", Obstacles, self.initialpose_sub_callback)
         self.ekf_pose_pub = rospy.Publisher("ekf_pose", PoseWithCovarianceStamped, queue_size=10)
         self.landmark_rviz = rospy.Publisher('landmark_updated', Obstacles, queue_size=10)
@@ -102,49 +135,73 @@ class EKF:
         Q = np.diag((0.02, 0.02, 0.05))
         if self.if_new_obstacles is True:
             self.updated_landmark_scan = []
+            L1_feat_list = []
+            L2_feat_list = []
+            L3_feat_list = []
             # for every obstacle (or beacon pillar), check the distance between real beacon position and itself.
             for landmark_scan in np.nditer(self.beacon_scan, flags=['external_loop'], order='F'):
-                landmark_scan = np.reshape(landmark_scan, (2,1))
-
                 # transfer landmark_scan type from (x, y) to (r, phi)
+                landmark_scan = np.reshape(landmark_scan, (2,1))
                 z_i = self._cartesian_to_polar(landmark_scan, np.zeros((3,1)))
                 j_max = -100
                 H_j_max = 0
                 S_j_max = 0
                 z_j_max = 0
+                landmark_kmax_x = -10
+                landmark_kmax_y = -10
                 for k in range(self.beacon_position.shape[1]):
                     landmark_k = np.reshape(self.beacon_position[:,k], (2,1))
+
                     z_k, H_k = self._cartesian_to_polar(landmark_k, mu_bar, cal_H=True)
                     S_k = H_k@sigma_bar@H_k.T + Q
                     S_k = self._fix_FP_issue(S_k)
                     try:
                         # original 
                         j_k = 1/np.sqrt(np.linalg.det(2*np.pi*S_k)) * np.exp(-0.5*(z_i-z_k).T@np.linalg.inv(S_k)@(z_i-z_k))
-                        
                         # ln(j_k()) version
                         # j_k = -0.5*(z_i-z_k).T@np.linalg.inv(S_k)@(z_i-z_k) - np.log(np.sqrt(np.linalg.det(2*np.pi*S_k)))
+
                         if np.around(j_k, 10)[0,0] > np.around(j_max, 10):
+                            landmark_kmax_x = landmark_k[0,0]
+                            landmark_kmax_y = landmark_k[1,0]
                             j_max = j_k.copy()
                             H_j_max = H_k.copy()
                             S_j_max = S_k.copy()
                             z_j_max = z_k.copy()
                     except Exception as e:
                         rospy.logerr("%s", e)
-                        # continue
-                    # rospy.loginfo("H_k=%s, sigma_bar=%s, S_k=%s", H_k, sigma_bar, S_k)
-                    # print("S_k-Q = ", H_k@sigma_bar@H_k.T, "H_k = ", H_k, "sigma_bar = ", sigma_bar)
+                        
                 # rospy.loginfo("j_max = %s", j_max)
-                rospy.loginfo_throttle(0.5, "j_max = %s", j_max)
-
-                if j_max > mini_likelihood and j_max != np.nan:
-                    K_i = sigma_bar@H_j_max.T@np.linalg.inv(S_j_max)
-                    mu_bar = mu_bar + K_i@(z_i-z_j_max)
-                    sigma_bar = (np.eye(3) - self._fix_FP_issue(K_i@H_j_max))@sigma_bar
-                    # rviz visualize
-                    lx = landmark_scan[0,0]
-                    ly = landmark_scan[1,0]
-                    self.updated_landmark_scan.append(state_vector(lx, ly, 0))
-        rospy.loginfo_throttle(0.5, "------------------")
+                # rospy.loginfo_throttle(0.5, "j_max = %s", j_max)
+                # if j_max > mini_likelihood and j_max != np.nan:
+                #     K_i = sigma_bar@H_j_max.T@np.linalg.inv(S_j_max)
+                #     mu_bar = mu_bar + K_i@(z_i-z_j_max)
+                #     sigma_bar = (np.eye(3) - self._fix_FP_issue(K_i@H_j_max))@sigma_bar
+                #     # rviz visualize
+                #     lx = landmark_scan[0,0]
+                #     ly = landmark_scan[1,0]
+                #     self.updated_landmark_scan.append(state_vector(lx, ly, 0))
+                # print("l = ", landmark_kmax_x, landmark_kmax_y)
+                feat = update_feature(j_max, H_j_max, S_j_max, z_i, z_j_max, landmark_k)
+                if landmark_kmax_x == self.landmark1.x and landmark_kmax_y == self.landmark1.y:
+                    L1_feat_list.append(feat)
+                if landmark_kmax_x == self.landmark2.x and landmark_kmax_y == self.landmark2.y:
+                    L2_feat_list.append(feat)
+                if landmark_kmax_x == self.landmark3.x and landmark_kmax_y == self.landmark3.y:
+                    L3_feat_list.append(feat)
+            if len(L1_feat_list) != 0:
+                L1_feat = max(L1_feat_list, key=operator.attrgetter('j'))
+                if L1_feat.update(mu_bar, sigma_bar) != "update error":
+                    mu_bar, sigma_bar = L1_feat.update(mu_bar, sigma_bar)
+            if len(L2_feat_list) != 0:
+                L2_feat = max(L2_feat_list, key=operator.attrgetter('j'))
+                if L2_feat.update(mu_bar, sigma_bar) != "update error":
+                    mu_bar, sigma_bar = L2_feat.update(mu_bar, sigma_bar)
+            if len(L3_feat_list) != 0:
+                L3_feat = max(L3_feat_list, key=operator.attrgetter('j'))
+                if L3_feat.update(mu_bar, sigma_bar) != "update error":
+                    mu_bar, sigma_bar = L3_feat.update(mu_bar, sigma_bar)
+        # rospy.loginfo_throttle(0.5, "------------------")
 
         self.mu = mu_bar.copy()
         self.sigma = self._fix_FP_issue(sigma_bar.copy())
@@ -260,8 +317,8 @@ class EKF:
         time_stamp = rospy.Time.now()
         v_x = odom.twist.twist.linear.x
         v_y = odom.twist.twist.linear.y
-        # w = odom.twist.twist.angular.z
-        w = self.imu_w
+        w = odom.twist.twist.angular.z
+        # w = self.imu_w
         self.ekf_localization(v_x, v_y, w)
         self.publish_ekf_pose(time_stamp + rospy.Duration(0.2))
         self.broadcast_ekf_pos_tf(odom)

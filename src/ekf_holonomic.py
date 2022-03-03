@@ -52,7 +52,8 @@ class update_feature:
         self.trans_sat = 5
         self.rotation_const = 0.5
         self.rot_sat = 5
-        self.score_threshold = 10
+        self.score_threshold = 12
+        # self.score_threshold = 15
     
     def update_condition(self, vec_err):
         trans_err = abs(vec_err[0,0])
@@ -68,26 +69,20 @@ class update_feature:
         else:
             rot_score = self.rot_sat
         self.score = trans_score + rot_score + self.j * self.likelihood_weight
-        # print(self.score)
+        print(self.score)
         if self.score > self.score_threshold:
             return 1
         else:
             return 0
 
     def update(self, state_pre, cov_pre):
-        # if self.j > self.mini_likelihood and self.j != np.nan:
-        if self.update_condition(self.z-self.z_hat):
+        if self.j > self.mini_likelihood and self.j != np.nan:
+        # if self.update_condition(self.z-self.z_hat):
             K_i = cov_pre@self.H.T@np.linalg.inv(self.S)
             d_z = self.z-self.z_hat
             d_z[1,0] = self.theta_convert(d_z[1,0])
             mu_bar = state_pre + K_i@(d_z)
             sigma_bar = (np.eye(3) - self._fix_FP_issue(K_i@self.H))@cov_pre
-            
-            # rviz visualize
-            # lx = landmark_scan[0,0]
-            # ly = landmark_scan[1,0]
-            # self.updated_landmark_scan.append(state_vector(lx, ly, 0))
-            # print([mu_bar, sigma_bar])
             return [mu_bar, sigma_bar]
         else:
             return "update error"
@@ -115,7 +110,6 @@ class update_feature:
             else:
                 output = input*-1
         return output
-
 class EKF:
     def __init__(self):
         self.landmark1 = state_vector(1.0, -0.05, 0)
@@ -186,7 +180,9 @@ class EKF:
         # set a minimum likelihood value
         mini_likelihood = 0.4
         # ekf update step:
-        Q = np.diag((0.02, 0.02, 0.05))
+        # Q = np.diag((0.02, 0.02, 0.05))
+        Q = np.diag((0.01, 0.01, 0.02))
+
         if self.if_new_obstacles is True:
             self.updated_landmark_scan = []
             L1_feat_list = []
@@ -219,7 +215,7 @@ class EKF:
                         # ln(j_k()) version
                         d_z = z_i-z_k
                         d_z[1,0] = self.theta_convert(d_z[1,0])
-                        print(d_z)
+                        # print(d_z)
                         j_k = -0.5*(d_z).T@np.linalg.inv(S_k)@(d_z) - np.log(np.sqrt(np.linalg.det(2*np.pi*S_k)))
                         # print(d)
                         if np.around(j_k, 10)[0,0] > np.around(j_max, 10):
@@ -268,7 +264,7 @@ class EKF:
                     ly = L3_feat.landmark_scan[1,0]
                     self.updated_landmark_scan.append(state_vector(lx, ly, 0))
         # rospy.loginfo_throttle(0.5, "------------------")
-        print("----------")
+        # print("--------")
 
 
         self.mu = mu_bar.copy()

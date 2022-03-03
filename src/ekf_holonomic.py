@@ -31,7 +31,7 @@ class state_vector:
         return math.sqrt(pow(self.x-p.x, 2) + pow(self.y-p.y, 2))
 
 class update_feature:
-    def __init__(self, j, H, S, z, z_hat, landmark):
+    def __init__(self, j, H, S, z, z_hat, landmark, landmark_scan):
         self.j = j
         self.H = H
         self.H_t = np.transpose(H)
@@ -41,7 +41,9 @@ class update_feature:
         self.z_hat = z_hat
         # the landmark which feature corresponded to ([[x],[y]])
         self.landmark = landmark
-        self.mini_likelihood = 0.4
+        # raw feature scanned by LiDAR (basefootprint origin)([[x],[y]])
+        self.landmark_scan = landmark_scan
+        self.mini_likelihood = 0.3
     
     def update(self, state_pre, cov_pre):
         if self.j > self.mini_likelihood and self.j != np.nan:
@@ -53,7 +55,7 @@ class update_feature:
             # lx = landmark_scan[0,0]
             # ly = landmark_scan[1,0]
             # self.updated_landmark_scan.append(state_vector(lx, ly, 0))
-            print([mu_bar, sigma_bar])
+            # print([mu_bar, sigma_bar])
             return [mu_bar, sigma_bar]
         else:
             return "update error"
@@ -164,6 +166,7 @@ class EKF:
                         if np.around(j_k, 10)[0,0] > np.around(j_max, 10):
                             landmark_kmax_x = landmark_k[0,0]
                             landmark_kmax_y = landmark_k[1,0]
+                            
                             j_max = j_k.copy()
                             H_j_max = H_k.copy()
                             S_j_max = S_k.copy()
@@ -173,34 +176,37 @@ class EKF:
                         
                 # rospy.loginfo("j_max = %s", j_max)
                 # rospy.loginfo_throttle(0.5, "j_max = %s", j_max)
-                # if j_max > mini_likelihood and j_max != np.nan:
-                #     K_i = sigma_bar@H_j_max.T@np.linalg.inv(S_j_max)
-                #     mu_bar = mu_bar + K_i@(z_i-z_j_max)
-                #     sigma_bar = (np.eye(3) - self._fix_FP_issue(K_i@H_j_max))@sigma_bar
-                #     # rviz visualize
-                #     lx = landmark_scan[0,0]
-                #     ly = landmark_scan[1,0]
-                #     self.updated_landmark_scan.append(state_vector(lx, ly, 0))
-                # print("l = ", landmark_kmax_x, landmark_kmax_y)
-                feat = update_feature(j_max, H_j_max, S_j_max, z_i, z_j_max, landmark_k)
+                feat = update_feature(j_max, H_j_max, S_j_max, z_i, z_j_max, landmark_k, landmark_scan)
                 if landmark_kmax_x == self.landmark1.x and landmark_kmax_y == self.landmark1.y:
                     L1_feat_list.append(feat)
                 if landmark_kmax_x == self.landmark2.x and landmark_kmax_y == self.landmark2.y:
                     L2_feat_list.append(feat)
                 if landmark_kmax_x == self.landmark3.x and landmark_kmax_y == self.landmark3.y:
                     L3_feat_list.append(feat)
+
             if len(L1_feat_list) != 0:
                 L1_feat = max(L1_feat_list, key=operator.attrgetter('j'))
                 if L1_feat.update(mu_bar, sigma_bar) != "update error":
                     mu_bar, sigma_bar = L1_feat.update(mu_bar, sigma_bar)
+                    lx = L1_feat.landmark_scan[0,0]
+                    ly = L1_feat.landmark_scan[1,0]
+                    self.updated_landmark_scan.append(state_vector(lx, ly, 0))
+
             if len(L2_feat_list) != 0:
                 L2_feat = max(L2_feat_list, key=operator.attrgetter('j'))
                 if L2_feat.update(mu_bar, sigma_bar) != "update error":
                     mu_bar, sigma_bar = L2_feat.update(mu_bar, sigma_bar)
+                    lx = L2_feat.landmark_scan[0,0]
+                    ly = L2_feat.landmark_scan[1,0]
+                    self.updated_landmark_scan.append(state_vector(lx, ly, 0))
+
             if len(L3_feat_list) != 0:
                 L3_feat = max(L3_feat_list, key=operator.attrgetter('j'))
                 if L3_feat.update(mu_bar, sigma_bar) != "update error":
                     mu_bar, sigma_bar = L3_feat.update(mu_bar, sigma_bar)
+                    lx = L3_feat.landmark_scan[0,0]
+                    ly = L3_feat.landmark_scan[1,0]
+                    self.updated_landmark_scan.append(state_vector(lx, ly, 0))
         # rospy.loginfo_throttle(0.5, "------------------")
 
         self.mu = mu_bar.copy()
